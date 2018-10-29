@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgl - cloth simulation</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<style>
+			body {
+				font-family: Monospace;
+				background-color: #000;
+				color: #000;
+				margin: 0px;
+				overflow: hidden;
+			}
+
+			#info {
+				position: absolute;
+				padding: 10px;
+				width: 100%;
+				text-align: center;
+			}
+
+			a {
+				text-decoration: underline;
+				cursor: pointer;
+			}
+
+		</style>
+	</head>
+
+	<body>
+		<div id="info">Tianxia Dong 117220530</div>
+
+		<script src="build/three.js"></script>
+		<script src="js/Stats.js"></script>
+		<script src="js/Detector.js"></script>
+		<script src="js/controls/OrbitControls.js"></script>
+		<script src="js/libs/stats.min.js"></script>
+		<script src="js/loaders/ColladaLoader.js"></script>
+		<script src="js/libs/dat.gui.min.js"></script>
+		<script src="js/cameras/CinematicCamera.js"></script>
+		<script src="js/omnitone.min.js"></script>
+		
+		<!-- ---------------- Custom Shader Code ------------------------ -->
+		<script id="vertexShader" type="x-shader/x-vertex">
+		uniform sampler2D noiseTexture;
+		uniform float noiseScale;
+		uniform sampler2D bumpTexture;
+		uniform float bumpSpeed;
+		uniform float bumpScale;
+		uniform float time;
+		varying vec2 vUv;
+		void main() 
+		{ 
+    		vUv = uv;
+	
+			vec2 uvTimeShift = vUv + vec2( 1.1, 1.9 ) * time * bumpSpeed;
+			vec4 noiseGeneratorTimeShift = texture2D( noiseTexture, uvTimeShift );
+			vec2 uvNoiseTimeShift = vUv + noiseScale * vec2( noiseGeneratorTimeShift.r, noiseGeneratorTimeShift.g );
+			// below, using uvTimeShift seems to result in more of a "rippling" effect
+			//   while uvNoiseTimeShift seems to result in more of a "shivering" effect
+			vec4 bumpData = texture2D( bumpTexture, uvTimeShift );
+			// move the position along the normal
+			//  but displace the vertices at the poles by the same amount
+			float displacement = ( vUv.y > 0.999 || vUv.y < 0.001 ) ? 
+			bumpScale * (0.3 + 0.02 * sin(time)) :  
+			bumpScale * bumpData.r;
+    		vec3 newPosition = position + normal * displacement;
+	
+			gl_Position = projectionMatrix * modelViewMatrix * vec4( newPosition, 1.0 );
+}
+</script>
+
+		<!-- fragment shader a.k.a. pixel shader -->
+		<script id="fragmentShader" type="x-shader/x-vertex"> 
+			uniform sampler2D baseTexture;
+			uniform float baseSpeed;
+			uniform float repeatS;
+			uniform float repeatT;
+			uniform sampler2D noiseTexture;
+			uniform float noiseScale;
+			uniform sampler2D blendTexture;
+			uniform float blendSpeed;
+			uniform float blendOffset;
+			uniform float time;
+			uniform float alpha;
+			varying vec2 vUv;
+		void main() 
+		{
+			vec2 uvTimeShift = vUv + vec2( -0.7, 1.5 ) * time * baseSpeed;	
+			vec4 noiseGeneratorTimeShift = texture2D( noiseTexture, uvTimeShift );
+			vec2 uvNoiseTimeShift = vUv + noiseScale * vec2( noiseGeneratorTimeShift.r, noiseGeneratorTimeShift.b );
+			vec4 baseColor = texture2D( baseTexture, uvNoiseTimeShift * vec2(repeatS, repeatT) );
+			vec2 uvTimeShift2 = vUv + vec2( 1.3, -1.7 ) * time * blendSpeed;	
+			vec4 noiseGeneratorTimeShift2 = texture2D( noiseTexture, uvTimeShift2 );
+			vec2 uvNoiseTimeShift2 = vUv + noiseScale * vec2( noiseGeneratorTimeShift2.g, noiseGeneratorTimeShift2.b );
+			vec4 blendColor = texture2D( blendTexture, uvNoiseTimeShift2 * vec2(repeatS, repeatT) ) - blendOffset * vec4(1.0, 1.0, 1.0, 1.0);
+			vec4 theColor = baseColor + blendColor;
+			theColor.a = alpha;
+			gl_FragColor = theColor;
+		}  
+</script>
+
+<!-- fragment shader a.k.a. plane shader -->
+<script id="vertexShaderPlane" type="x-shader/x-vertex">
+varying vec2 vUv;
+void main() 
+{ 
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+</script>
+<script id="fragmentShaderPlane" type="x-shader/x-vertex"> 
+uniform sampler2D baseTexture;
+uniform float baseSpeed;
+uniform sampler2D noiseTexture;
+uniform float noiseScale;
+uniform float alpha;
+uniform float time;
+
+varying vec2 vUv;
+void main() 
+{
+	vec2 uvTimeShift = vUv + vec2( -0.7, 1.5 ) * time * baseSpeed;	
+	vec4 noiseGeneratorTimeShift = texture2D( noiseTexture, uvTimeShift );
+	vec2 uvNoiseTimeShift = vUv + noiseScale * vec2( noiseGeneratorTimeShift.r, noiseGeneratorTimeShift.b );
+	vec4 baseColor = texture2D( baseTexture, uvNoiseTimeShift );
+
+	baseColor.a = alpha;
+	gl_FragColor = baseColor;
+}  
+</script>
+
+		<script>
+			
+			
+
+			if ( ! Detector.webgl ) Detector.addGetWebGLMessage();
+
+			var container, stats;
+			var camera, scene, renderer, raycaster;
+			
+			//camera 
+			var cameraControl;
+			var cameraTour = true;
+			
+			var clothGeometry;
+			var sphere;
+			var object;
+			var ucc;
+			var character1, character2, character3, billboard;
+			
+			// custom global variables
+			var video, videoImage, videoImageContext, videoTexture;
+			
+			//light var
+			var lightHelper, shadowCameraHelper;
+			//gui
+			var gui;
+			
+			//cube for normal mapping
+			var box, boxTexture, boxNormalMap;
+			
+			//sphere for environment mapping
+			var sphereEnv;
+			
+			// custom global variables
+			var cube;
+			
+			//
+			var clock = new THREE.Clock();
+			
+			// custom global variables
+			var mirrorCube, mirrorCubeCamera; // for mirror material
+			var mirrorSphere, mirrorSphereCamera; // for mirror material
+			
+			//light var
+			var directionLight, materials;
+			
+
+			init();
+			animate();
+			buildGui();
+
+			function init() {
+
+				container = document.createElement( 'div' );
+				document.body.appendChild( container );
+
+				// scene
+
+				scene = new THREE.Scene();
+				scene.background = new THREE.Color( 0xcce0ff );
+				//scene.fog = new THREE.Fog( 0xcce0ff, 500, 10000 );
+
+				// camera
+
+				//camera = new THREE.PerspectiveCamera( 30, window.innerWidth / window.innerHeight, 1, 10000 );
+				//camera.position.set( 1000, 50, 1500 );
+				//camera.position.set( 50, 10, 8 );
+				//camera.lookAt( new THREE.Vector3( 0, 3, 0 ) );
+				camera = new THREE.PerspectiveCamera(30, window.innerWidth / window.innerHeight, 1, 10000);
+    			camera.position.set( -1000, 2500, 4000 );
+    			camera.lookAt(scene.position);
+   				cameraControl = new THREE.OrbitControls(camera);
+				
+				
+				var light = new THREE.AmbientLight( 0x404040, 0.3); // soft white light
+				light.castShadow = true;
+				scene.add( light );
+				
+				
+				
+				// lights
+				directionLight = new THREE.DirectionalLight( 0xdfebff, 2 );
+				
+				directionLight.position.set( 50, 100, 100 );
+				directionLight.position.multiplyScalar( 1.3 );
+				
+				directionLight.visible = true;
+				directionLight.castShadow = true;
+
+				directionLight.shadow.mapSize.width = 2000;
+				directionLight.shadow.mapSize.height = 2000;
+
+				var d = 300;
+
+				directionLight.shadow.camera.left = - d;
+				directionLight.shadow.camera.right = d;
+				directionLight.shadow.camera.top = d;
+				directionLight.shadow.camera.bottom = - d;
+
+				directionLight.shadow.camera.far = 1000;
+				scene.add( directionLight );
+				lightHelper = new THREE.DirectionalLightHelper( directionLight );
+				shadowCameraHelper = new THREE.CameraHelper( directionLight.shadow.camera );
+				scene.add( shadowCameraHelper );
+				scene.add( new THREE.AxesHelper( 10 ) );
+				scene.add( lightHelper );
+				
+
+				// ground
+				var loader = new THREE.TextureLoader();
+				var groundTexture = loader.load( 'texture/grasslight-big.png' );
+				groundTexture.wrapS = groundTexture.wrapT = THREE.RepeatWrapping;
+				groundTexture.repeat.set( 25, 25 );
+				groundTexture.anisotropy = 16;
+
+				var groundMaterial = new THREE.MeshLambertMaterial( { map: groundTexture } );
+				var mesh = new THREE.Mesh( new THREE.PlaneBufferGeometry( 20000, 20000 ), groundMaterial );
+				mesh.position.y = - 250;
+				mesh.rotation.x = - Math.PI / 2;
+				mesh.receiveShadow = true;
+				scene.add( mesh );
+				
+				
+				
+				
+				
+				
+				//elf
+				// loading manager
+
+				var loadingManager = new THREE.LoadingManager( function() {
+
+					scene.add( ucc );
+					scene.add(character1);
+					scene.add(character2);
+					scene.add(character3);
+					scene.add(billboard);
+
+				} );
+				
+				
+				// collada
+				//load ucc
+				var loader = new THREE.ColladaLoader( loadingManager );
+				loader.load( './models/ucc/untitled.dae', function ( collada ) {
+
+					ucc = collada.scene;
+					ucc.position.set(-400,-250,-800);
+					
+					//ucc.rotation.x = -0.2;
+
+					ucc.receiveShadow = true;
+					ucc.scale.x = ucc.scale.y = ucc.scale.z = 0.8;
+					
+
+				} );
+				
+				
+				//load character1
+				loader.load( './models/Harry/model.dae', function ( collada ) {
+
+					character1 = collada.scene;
+					character1.position.set(0,-250,20);
+					character1.rotation.x = 0;
+					character1.rotation.y = 3.5;
+					character1.rotation.z = 0;
+					character1.traverse(function(child){
+						child.castShadow = true;
+						child.receiveShadow = true;
+					});
+					
+					//character1.scale.x = character1.scale.y = character1.scale.z = 0.8;
+					
+					
+
+				} );
+				
+				//load character2
+				loader.load( './models/Hermione/model.dae', function ( collada ) {
+
+					character2 = collada.scene;
+					character2.position.set(-200,-250,50);
+					
+					character2.rotation.x = 0;
+
+					//character1.scale.x = character1.scale.y = character1.scale.z = 0.8;
+					character2.traverse(function(child){
+						child.castShadow = true;
+						child.receiveShadow = true;
+					});
+					
+
+				} );
+				
+				//load character3
+				loader.load( './models/Voldemort/model.dae', function ( collada ) {
+
+					character3 = collada.scene;
+					character3.position.set(300,-250,150);
+					
+					character3.rotation.x = 0;
+
+					character3.traverse(function(child){
+						child.castShadow = true;
+						child.receiveShadow = true;
+					});
+					//character1.scale.x = character1.scale.y = character1.scale.z = 0.8;
+					
+
+				} );
+				
+				
+				//loadBillboard
+				// load the video container
+    			loader.load('./models/Billboard/model.dae', function(collada){
+			
+					billboard = collada.scene;
+			
+					billboard.position.set(400, -250, -800 );
+					billboard.scale.set(3, 3, 3);
+					//billboard.rotateZ( -Math.PI /15);
+					billboard.rotation.y = 0;
+					billboard.rotation.z = 0;
+					billboard.traverse(function(child){
+						child.castShadow = true;
+						child.receiveShadow = true;
+				});
+				});
+				
+				///////////
+				// VIDEO //
+				///////////
+	
+				// create the video element
+				video = document.createElement( 'video' );
+				// video.id = 'video';
+				// video.type = ' video/ogg; codecs="theora, vorbis" ';
+				video.src = "movie/video.mp4";
+				video.load(); // must call after setting/changing source
+				video.play();
+	
+				// alternative method -- 
+				// create DIV in HTML:
+				// <video id="myVideo" autoplay style="display:none">
+				//		<source src="videos/sintel.ogv" type='video/ogg; codecs="theora, vorbis"'>
+				// </video>
+				// and set JS variable:
+				// video = document.getElementById( 'myVideo' );
+	
+				videoImage = document.createElement( 'canvas' );
+				videoImage.width = 480;
+				videoImage.height = 204;
+				videoImageContext = videoImage.getContext( '2d' );
+				// background color if no video present
+				videoImageContext.fillStyle = '#000000';
+				videoImageContext.fillRect( 0, 0, videoImage.width, videoImage.height );
+				videoTexture = new THREE.Texture( videoImage );
+				videoTexture.minFilter = THREE.LinearFilter;
+				videoTexture.magFilter = THREE.LinearFilter;
+	
+				var movieMaterial = new THREE.MeshBasicMaterial( { map: videoTexture, overdraw: true, side:THREE.DoubleSide } );
+				// the geometry on which the movie will be displayed;
+				// 		movie image will be scaled to fit these dimensions.
+				var movieGeometry = new THREE.PlaneGeometry( 630, 300, 4, 4 );
+				var movieScreen = new THREE.Mesh( movieGeometry, movieMaterial );
+				movieScreen.rotation.y = 1.6;
+				movieScreen.rotation.z = 0;
+				movieScreen.position.set(400, 70, -1220);
+				scene.add(movieScreen);
+				
+				
+				//normal texture
+				var textureLoader = new THREE.TextureLoader();
+				boxTexture = textureLoader.load("texture/crate0_diffuse.png");
+				boxNormalMap = textureLoader.load("texture/crate0_normal.png");
+				
+				//normal mapping for cube
+				box = new THREE.Mesh(
+					new THREE.BoxGeometry(100,100,100),
+					new THREE.MeshPhongMaterial({
+						color:0xffffff,
+						map:boxTexture,
+						normalMap:boxNormalMap
+						})
+				);
+				scene.add(box);
+				box.position.set(0,-50,0);
+				box.receiveShadow = true;
+				box.castShadow = true;
+				
+				/*
+				//environment mapping for sphere
+				var geometry = new THREE.SphereBufferGeometry(400.0, 48, 24);
+				sphereMaterial = new THREE.MeshLambertMaterial({envMap: textureCube});
+				sphereEnv = new THREE.Mesh(geometry, sphereMaterial);
+				*/
+				
+				
+				
+				
+				//add the spatial audio
+				audioAPI();
+				
+				
+				//////////shader////////////
+				// SKYBOX/FOG
+				var materialArray = [];
+				materialArray.push(new THREE.MeshBasicMaterial( { map: THREE.ImageUtils.loadTexture( 'texture/skybox/px.jpg' ) }));
+				materialArray.push(new THREE.MeshBasicMaterial( { map: THREE.ImageUtils.loadTexture( 'texture/skybox/nx.jpg' ) }));
+				materialArray.push(new THREE.MeshBasicMaterial( { map: THREE.ImageUtils.loadTexture( 'texture/skybox/py.jpg' ) }));
+				materialArray.push(new THREE.MeshBasicMaterial( { map: THREE.ImageUtils.loadTexture( 'texture/skybox/ny.jpg' ) }));
+				materialArray.push(new THREE.MeshBasicMaterial( { map: THREE.ImageUtils.loadTexture( 'texture/skybox/pz.jpg' ) }));
+				materialArray.push(new THREE.MeshBasicMaterial( { map: THREE.ImageUtils.loadTexture( 'texture/skybox/nz.jpg' ) }));
+				for (var i = 0; i < 6; i++)
+	  			materialArray[i].side = THREE.BackSide;
+				var skyboxMaterial = new THREE.MeshFaceMaterial( materialArray );
+	
+				var skyboxGeom = new THREE.CubeGeometry( 5000, 5000, 5000, 1, 1, 1 );
+	
+				var skybox = new THREE.Mesh( skyboxGeom, skyboxMaterial );
+				scene.add( skybox );	
+				
+				
+				
+				////////////
+				// CUSTOM shader//
+				////////////
+	
+				// base image texture for mesh
+				var lavaTexture = new THREE.ImageUtils.loadTexture( 'images/water.jpg');
+				lavaTexture.wrapS = lavaTexture.wrapT = THREE.RepeatWrapping; 
+				// multiplier for distortion speed 		
+				var baseSpeed = 0.02;
+				// number of times to repeat texture in each direction
+				var repeatS = repeatT = 4.0;
+	
+				// texture used to generate "randomness", distort all other textures
+				var noiseTexture = new THREE.ImageUtils.loadTexture( 'images/cloud.png' );
+				noiseTexture.wrapS = noiseTexture.wrapT = THREE.RepeatWrapping; 
+				// magnitude of noise effect
+				var noiseScale = 0.5;
+	
+				// texture to additively blend with base image texture
+				var blendTexture = new THREE.ImageUtils.loadTexture( 'images/lava.jpg' );
+				blendTexture.wrapS = blendTexture.wrapT = THREE.RepeatWrapping; 
+				// multiplier for distortion speed 
+				var blendSpeed = 0.01;
+				// adjust lightness/darkness of blended texture
+				var blendOffset = 0.25;
+				// texture to determine normal displacement
+				var bumpTexture = noiseTexture;
+				bumpTexture.wrapS = bumpTexture.wrapT = THREE.RepeatWrapping; 
+				// multiplier for distortion speed 		
+				var bumpSpeed   = 0.15;
+				// magnitude of normal displacement
+				var bumpScale   = 40.0;
+	
+				// use "this." to create global object
+				this.customUniforms = {
+				baseTexture: 	{ type: "t", value: lavaTexture },
+				baseSpeed:		{ type: "f", value: baseSpeed },
+				repeatS:		{ type: "f", value: repeatS },
+				repeatT:		{ type: "f", value: repeatT },
+				noiseTexture:	{ type: "t", value: noiseTexture },
+				noiseScale:		{ type: "f", value: noiseScale },
+				blendTexture:	{ type: "t", value: blendTexture },
+				blendSpeed: 	{ type: "f", value: blendSpeed },
+				blendOffset: 	{ type: "f", value: blendOffset },
+				bumpTexture:	{ type: "t", value: bumpTexture },
+				bumpSpeed: 		{ type: "f", value: bumpSpeed },
+				bumpScale: 		{ type: "f", value: bumpScale },
+				alpha: 			{ type: "f", value: 1.0 },
+				time: 			{ type: "f", value: 1.0 }
+				};
+	
+				// create custom material from the shader code above
+				//   that is within specially labeled script tags
+				var customMaterial = new THREE.ShaderMaterial( 
+				{
+	   				 uniforms: customUniforms,
+					vertexShader:   document.getElementById( 'vertexShader'   ).textContent,
+					fragmentShader: document.getElementById( 'fragmentShader' ).textContent
+				}   );
+				
+				// other material properties
+				customMaterial.side = THREE.DoubleSide;
+		
+				var ballGeometry = new THREE.SphereGeometry( 60, 64, 64 );
+				var ball = new THREE.Mesh(	ballGeometry, customMaterial );
+				ball.position.set(0, 65, 160);
+				scene.add( ball );
+				
+				////////////animated shader///////////////
+				//////////////////////////////////////////
+				//////////////////////////////////////////
+				///lava
+				// use "this." to create global object
+				var noiseTexture = new THREE.ImageUtils.loadTexture( 'images/cloud.png' );
+				noiseTexture.wrapS = noiseTexture.wrapT = THREE.RepeatWrapping; 
+		
+				var lavaTexture = new THREE.ImageUtils.loadTexture( 'images/lava.jpg' );
+				lavaTexture.wrapS = lavaTexture.wrapT = THREE.RepeatWrapping;
+				
+				this.customUniforms1 = {
+					baseTexture: 	{ type: "t", value: lavaTexture },
+					baseSpeed: 		{ type: "f", value: 0.05 },
+					noiseTexture: 	{ type: "t", value: noiseTexture },
+					noiseScale:		{ type: "f", value: 0.5337 },
+					alpha: 			{ type: "f", value: 1.0 },
+					time: 			{ type: "f", value: 1.0 }
+				};
+	
+				// create custom material from the shader code above
+				//   that is within specially labeled script tags
+				var customMaterial1 = new THREE.ShaderMaterial( 
+				{
+	   				uniforms: customUniforms1,
+					vertexShader:   document.getElementById( 'vertexShaderPlane'   ).textContent,
+					fragmentShader: document.getElementById( 'fragmentShaderPlane' ).textContent
+				}   );
+				
+				
+				// apply the material to a surface1
+				var flatGeometry = new THREE.PlaneGeometry( 300, 300 );
+    			var surface = new THREE.Mesh( flatGeometry, customMaterial1 );
+				surface.position.set(-60,350,150);
+				scene.add( surface );
+				
+				
+				
+				/////////////////////////////////
+				// again, but for water!
+	
+				var waterTexture = new THREE.ImageUtils.loadTexture( 'images/water.jpg' );
+				waterTexture.wrapS = waterTexture.wrapT = THREE.RepeatWrapping;
+				
+				// use "this." to create global object
+				this.customUniforms2 = {
+					baseTexture: 	{ type: "t", value: waterTexture },
+					baseSpeed: 		{ type: "f", value: 1.15 },
+					noiseTexture: 	{ type: "t", value: noiseTexture },
+					noiseScale:		{ type: "f", value: 0.2 },
+					alpha: 			{ type: "f", value: 0.8 },
+					time: 			{ type: "f", value: 1.0 }
+				};
+				// create custom material from the shader code above
+				//   that is within specially labeled script tags
+				var customMaterial2 = new THREE.ShaderMaterial( 
+				{
+	    			uniforms: customUniforms2,
+					vertexShader:   document.getElementById( 'vertexShaderPlane'   ).textContent,
+					fragmentShader: document.getElementById( 'fragmentShaderPlane' ).textContent
+				}   );
+ 
+				// other material properties
+				customMaterial2.side = THREE.DoubleSide;
+				customMaterial2.transparent = true;
+	
+				// apply the material to a surface
+				var flatGeometry = new THREE.PlaneGeometry( 300, 300 );
+    			var surface = new THREE.Mesh( flatGeometry, customMaterial2 );
+				surface.position.set(60,550,-150);
+				scene.add( surface );	
+				
+				
+				
+				//////////////////////////////////////////////
+				////////reflection Environment mapping////////
+				//////////////////////////////////////////////
+	
+				var cubeGeom = new THREE.CubeGeometry(100, 100, 100, 1, 1, 1);
+				mirrorCubeCamera = new THREE.CubeCamera( 0.1, 5000, 512 );
+				// mirrorCubeCamera.renderTarget.minFilter = THREE.LinearMipMapLinearFilter;
+				scene.add( mirrorCubeCamera );
+				var mirrorCubeMaterial = new THREE.MeshBasicMaterial( { envMap: mirrorCubeCamera.renderTarget } );
+				mirrorCube = new THREE.Mesh( cubeGeom, mirrorCubeMaterial );
+				mirrorCube.position.set(-75,50,0);
+				mirrorCubeCamera.position = mirrorCube.position;
+				scene.add(mirrorCube);	
+	
+				var sphereGeom =  new THREE.SphereGeometry( 50, 32, 16 ); // radius, segmentsWidth, segmentsHeight
+				mirrorSphereCamera = new THREE.CubeCamera( 0.1, 5000, 512 );
+				// mirrorCubeCamera.renderTarget.minFilter = THREE.LinearMipMapLinearFilter;
+				scene.add( mirrorSphereCamera );
+				var mirrorSphereMaterial = new THREE.MeshBasicMaterial( { envMap: mirrorSphereCamera.renderTarget } );
+				mirrorSphere = new THREE.Mesh( sphereGeom, mirrorSphereMaterial );
+				mirrorSphere.position.set(75,50,0);
+				mirrorSphereCamera.position = mirrorSphere.position;
+				scene.add(mirrorSphere);
+				
+				
+				
+				// renderer
+
+				renderer = new THREE.WebGLRenderer( { antialias: true } );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+				container.appendChild( renderer.domElement );
+
+				renderer.gammaInput = true;
+				renderer.gammaOutput = true;
+
+				renderer.shadowMap.enabled = true;
+
+				// controls
+				var controls = new THREE.OrbitControls( camera, renderer.domElement );
+				controls.maxPolarAngle = Math.PI * 0.5;
+				controls.minDistance = 1000;
+				controls.maxDistance = 5000;
+				controls.addEventListener('change', render);
+
+				// performance monitor
+
+				stats = new Stats();
+				container.appendChild( stats.dom );
+
+				//
+
+				window.addEventListener( 'resize', onWindowResize, false );
+				/*
+				sphere.visible = ! true;
+				*/
+
+			}
+
+			//
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+			
+			function audioAPI(){
+
+				// Set up an audio element to feed the ambisonic source audio feed.  
+    			var audioElement = document.createElement('audio');
+   				audioElement.src = 'sounds/bell.mp3';
+    			audioElement.loop = true;
+
+    			// Create AudioContext, MediaElementSourceNode and FOARenderer.
+    			var audioContext = new AudioContext();
+    			var audioElementSource = audioContext.createMediaElementSource(audioElement);
+    			var foaRenderer = Omnitone.createFOARenderer(audioContext);
+
+    			// Make connection and start play.
+    			foaRenderer.initialize().then(function() {
+    			audioElementSource.connect(foaRenderer.input);
+    			foaRenderer.output.connect(audioContext.destination);
+   				audioElement.play();
+   				 });
+			}
+
+			//
+
+			function animate() {
+
+				requestAnimationFrame( animate );
+
+				var time = Date.now();
+				
+				box.rotation.y += 0.2;
+				
+				var t = ( Date.now() / 500 );
+
+				var r = 600.0;
+				var lx = r * Math.cos( t );
+				var lz = r * Math.sin( t );
+				var ly = 5.0 + 5.0 * Math.sin( t / 3.0 );
+				directionLight.position.set( lx, ly, lz );
+				directionLight.lookAt( origin );
+				
+				render();
+				update();
+				stats.update();
+
+			}
+
+			function render() {
+				
+				if ( video.readyState === video.HAVE_ENOUGH_DATA ) 
+				{
+					videoImageContext.drawImage( video, 0, 0 );
+					if ( videoTexture ) 
+					videoTexture.needsUpdate = true;
+				}
+				
+				
+				lightHelper.update();
+				shadowCameraHelper.update();
+				
+				// move the CubeCamera to the position of the object
+				//    that has a reflective surface, "take a picture" in each direction
+				//    and apply it to the surface.
+				// need to hide surface before and after so that it does not
+				//    "get in the way" of the camera
+				mirrorCube.visible = false;
+				mirrorCubeCamera.updateCubeMap( renderer, scene );
+				mirrorCube.visible = true;
+
+				mirrorSphere.visible = false;
+				mirrorSphereCamera.updateCubeMap( renderer, scene );
+				mirrorSphere.visible = true;
+				
+				//camera
+				if(cameraTour){
+				var timer = Date.now() * 0.0005;
+				camera.position.x = Math.cos( timer ) * 4000;
+				camera.position.z = Math.sin( timer ) * 4000;
+				camera.lookAt( scene.position );
+	}
+
+	
+    cameraControl.update();
+				renderer.render( scene, camera );
+
+			}
+			
+			function update()
+		{
+	
+			var delta = clock.getDelta();
+			
+			customUniforms.time.value += delta;
+			customUniforms1.time.value += delta;
+			customUniforms2.time.value += delta;
+			
+			//controls.update();
+			stats.update();
+		}
+
+			function buildGui() {
+				gui = new dat.GUI();
+				var params = {
+					'camera tour' : true,
+					x: directionLight.position.x,
+					y: directionLight.position.y,
+					z: directionLight.position.z,
+					'Light color': directionLight.color.getHex(),
+					'Intensity': directionLight.intensity,
+					'Turn on':directionLight.visible
+				}
+				
+				var folder1 = gui.addFolder('LightAngle');
+				var lightX = folder1.add( params, 'x' ).min(-2000).max(2000).step(1).listen();
+				var lightY = folder1.add( params, 'y' ).min(0).max(2000).step(1).listen();
+				var lightZ = folder1.add( params, 'z' ).min(-200).max(2000).step(1).listen();
+				folder1.open();
+				
+				lightX.onChange(function(value) {   directionLight.position.x = value;   });
+				lightY.onChange(function(value) {   directionLight.position.y = value;   });
+				lightZ.onChange(function(value) {   directionLight.position.z = value;   });
+				
+				gui.add(params, 'Turn on').onChange( function( val ){
+					directionLight.visible = val;
+					render();
+				});
+				gui.addColor( params, 'Light color' ).onChange( function ( val ) {
+					directionLight.color.setHex( val );
+					render();
+				} );
+				gui.add( params, 'Intensity', 0, 4 ).onChange( function ( val ) {
+					directionLight.intensity = val;
+					render();
+				} );
+				gui.add(params, 'camera tour').onChange(cameraAction);
+				
+				
+				
+				gui.open();
+			}
+
+			function cameraAction() {
+				cameraTour = !cameraTour;
+			}
+		</script>
+	</body>
+</html>
